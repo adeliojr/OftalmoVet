@@ -1,0 +1,1898 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ficha Oftalmológica Veterinária - HVA</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    @media print {
+      body { background: white !important; }
+      .no-print { display: none !important; }
+    }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-800 antialiased min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // --- Utilitários de Data e DB ---
+    function hojeISO() {
+      const d = new Date();
+      const ano = d.getFullYear();
+      const mes = String(d.getMonth() + 1).padStart(2, '0');
+      const dia = String(d.getDate()).padStart(2, '0');
+      return `${ano}-${mes}-${dia}`;
+    }
+
+    function fmtData(iso) {
+      if (!iso) return '';
+      const partes = String(iso).split('-');
+      if (partes.length === 3) return `${partes[2]}/${partes[1]}/${partes[0]}`;
+      return String(iso);
+    }
+
+    function novoId() {
+      return 'f_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6);
+    }
+
+    function normalizarTexto(txt) {
+      return String(txt || '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .trim();
+    }
+
+    // IndexedDB local
+    const DB_NAME = 'oftalmo_hva_standalone_db';
+    const DB_VERSION = 1;
+    const STORE_NAME = 'fichas';
+
+    function abrirDB() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains(STORE_NAME)) {
+            db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    const FichasDB = {
+      async salvar(ficha) {
+        const db = await abrirDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, 'readwrite');
+          tx.objectStore(STORE_NAME).put(ficha);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      },
+      async listar() {
+        const db = await abrirDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, 'readonly');
+          const req = tx.objectStore(STORE_NAME).getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => reject(req.error);
+        });
+      },
+      async obter(id) {
+        const db = await abrirDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, 'readonly');
+          const req = tx.objectStore(STORE_NAME).get(id);
+          req.onsuccess = () => resolve(req.result || null);
+          req.onerror = () => reject(req.error);
+        });
+      },
+      async excluir(id) {
+        const db = await abrirDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, 'readwrite');
+          tx.objectStore(STORE_NAME).delete(id);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      }
+    };
+
+    // Estruturas anatômicas
+    const ESTRUTURAS = [
+      { key: 'palpebras', label: 'Pálpebras' },
+      { key: 'terceira_palpebra', label: '3ª Pálpebra' },
+      { key: 'conjuntiva', label: 'Conjuntiva' },
+      { key: 'cornea', label: 'Córnea' },
+      { key: 'camara_anterior', label: 'Câmara Anterior' },
+      { key: 'iris', label: 'Íris' },
+      { key: 'pupila', label: 'Pupila' },
+      { key: 'cristalino', label: 'Cristalino' },
+      { key: 'vitreo', label: 'Vítreo' },
+      { key: 'retina', label: 'Retina' },
+      { key: 'nervo_optico', label: 'Nervo Óptico' },
+    ];
+
+    const TESTES_CORNEA = [
+      { key: 'fluoresceina', label: 'Fluoresceína' },
+      { key: 'rosa_bengala', label: 'Rosa Bengala' },
+      { key: 'fenilefrina', label: 'Fenilefrina' },
+    ];
+
+    const EXAMES_COMPLEMENTARES = [
+      { key: 'ultrassom', label: 'Ultrassom Ocular' },
+      { key: 'cultura', label: 'Cultura e Antibiograma' },
+      { key: 'fotocromatico', label: 'Teste Fotocromático' },
+      { key: 'erg', label: 'ERG (Eletrorretinografia)' },
+      { key: 'laboratoriais', label: 'Exames Laboratoriais' },
+    ];
+
+    function interpretSchirmer(val) {
+      const n = parseFloat(String(val).replace(',', '.'));
+      if (isNaN(n)) return '';
+      return n < 15 ? 'Baixa produção lacrimal' : 'Normal';
+    }
+
+    function interpretPio(val) {
+      const n = parseFloat(String(val).replace(',', '.'));
+      if (isNaN(n)) return '';
+      if (n < 11) return 'Hipotonia ocular';
+      if (n > 25) return 'Hipertensão ocular';
+      return 'Normal';
+    }
+
+    // --- Componente Principal ---
+    function App() {
+      const [patient, setPatient] = useState({
+        nome: '',
+        especie: '',
+        raca: '',
+        sexo: '',
+        idade: '',
+        tutor: '',
+      });
+
+      const [location, setLocation] = useState({
+        data: hojeISO(),
+        tipoConsulta: 'Consulta',
+      });
+
+      const [chiefComplaint, setChiefComplaint] = useState('');
+      const [examsOD, setExamsOD] = useState({});
+      const [examsOE, setExamsOE] = useState({});
+      const [examesComplementares, setExamesComplementares] = useState({});
+
+      const [tratamentoOral, setTratamentoOral] = useState('');
+      const [tratamentoOD, setTratamentoOD] = useState('');
+      const [tratamentoOE, setTratamentoOE] = useState('');
+      const [retornoOuAlta, setRetornoOuAlta] = useState('');
+      const [diagnostico, setDiagnostico] = useState('');
+
+      const [consulta, setConsulta] = useState(null);
+
+      // Estado de gravação com blocos de 5 minutos e MP3
+      const [gravando, setGravando] = useState(false);
+      const [pausado, setPausado] = useState(false);
+      const [segundos, setSegundos] = useState(0);
+      const [segundosNoBloco, setSegundosNoBloco] = useState(0);
+      const [blocoAtualNumero, setBlocoAtualNumero] = useState(1);
+      const [audioUrl, setAudioUrl] = useState(null);
+      const [audioBlob, setAudioBlob] = useState(null);
+      const [segmentos, setSegmentos] = useState([]);
+      const [blocoAbertoId, setBlocoAbertoId] = useState(null);
+      const [masterMp3Blob, setMasterMp3Blob] = useState(null);
+      const [masterMp3Url, setMasterMp3Url] = useState(null);
+      const [processandoMaster, setProcessandoMaster] = useState(false);
+      const [transcricao, setTranscricao] = useState('');
+
+      // Modais
+      const [modalExame, setModalExame] = useState(null); // { titulo, key, lado, valor, fotos }
+      const [modalQueixa, setModalQueixa] = useState(false);
+      const [modalDiagnostico, setModalDiagnostico] = useState(false);
+      const [modalReceita, setModalReceita] = useState(false);
+      const [modalRelatorioTutor, setModalRelatorioTutor] = useState(false);
+      const [modalRelatorioProntuario, setModalRelatorioProntuario] = useState(false);
+      const [modalNotebook, setModalNotebook] = useState(false);
+      const [modalBusca, setModalBusca] = useState(false);
+      const [modalFotoSistema, setModalFotoSistema] = useState(false);
+      const [modalFotoCelular, setModalFotoCelular] = useState(false);
+
+      const API_BASE = window.location.origin.startsWith('http') ? window.location.origin : 'https://ais-pre-jx56ceib3juewoi7sshag6-425411440698.us-east5.run.app';
+
+      // Persistência
+      const [fichaId, setFichaId] = useState(null);
+      const [atendId, setAtendId] = useState(null);
+      const [fichaAtual, setFichaAtual] = useState(null);
+      const [aviso, setAviso] = useState(null);
+      const [salvando, setSalvando] = useState(false);
+
+      const recRef = useRef(null);
+      const streamRef = useRef(null);
+      const timerRelRef = useRef(null);
+      const currentBlockChunksRef = useRef([]);
+      const masterChunksRef = useRef([]);
+      const actxRef = useRef(null);
+      const wakeLockRef = useRef(null);
+      const inicioGravacaoTotalRef = useRef(0);
+      const tempoAcumuladoTotalRef = useRef(0);
+      const inicioBlocoRef = useRef(0);
+      const tempoAcumuladoBlocoRef = useRef(0);
+      const blocoNumeroRef = useRef(1);
+      const blocoInicioSecRef = useRef(0);
+      const DURACAO_BLOCO = 300; // 5 minutos = 300s
+
+      function mostrarAviso(texto, erro = false) {
+        setAviso({ texto, erro });
+        setTimeout(() => setAviso(null), 4000);
+      }
+
+      function base64ToBlob(base64, mimeType = 'audio/mp3') {
+        const binaryString = window.atob(base64);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
+        return new Blob([bytes], { type: mimeType });
+      }
+
+      function blobParaBase64(blob) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const res = reader.result;
+            if (typeof res === 'string') {
+              const base64 = res.includes(',') ? res.split(',')[1] : res;
+              resolve(base64);
+            } else {
+              reject(new Error('Erro ao ler blob'));
+            }
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      }
+
+      function baixarBlobMp3(blob, nomeArquivo) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = nomeArquivo.endsWith('.mp3') ? nomeArquivo : nomeArquivo + '.mp3';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+      }
+
+      function fmtSegundos(s) {
+        const min = Math.floor(s / 60);
+        const sec = s % 60;
+        return String(min).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
+      }
+
+      // Converte e transcreve bloco de 5 minutos
+      async function processarSegmento(segId, numero, tempoInicio, tempoFim, blob) {
+        setSegmentos(prev => prev.map(s => s.id === segId ? { ...s, status: 'convertendo' } : s));
+        try {
+          const base64 = await blobParaBase64(blob);
+          let mp3Blob = null;
+          let mp3Url = null;
+
+          try {
+            const convRes = await fetch(API_BASE + '/api/audio/convert-mp3', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ audioBase64: base64, mimeType: blob.type })
+            });
+            if (convRes.ok) {
+              const data = await convRes.json();
+              mp3Blob = base64ToBlob(data.mp3Base64, 'audio/mp3');
+              mp3Url = URL.createObjectURL(mp3Blob);
+            }
+          } catch (e) {
+            console.warn('Erro ao converter bloco para MP3 no servidor:', e);
+          }
+
+          setSegmentos(prev => prev.map(s => s.id === segId ? { ...s, status: 'transcrevendo', mp3Blob, mp3Url } : s));
+
+          // Transcrever com Gemini
+          let textoTranscrito = '';
+          try {
+            const transRes = await fetch(API_BASE + '/api/gemini/transcribe', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ audioBase64: base64, mimeType: blob.type })
+            });
+            if (transRes.ok) {
+              const tData = await transRes.json();
+              textoTranscrito = (tData.text || '').trim();
+            }
+          } catch (e) {
+            console.warn('Erro ao transcrever bloco:', e);
+          }
+
+          if (textoTranscrito) {
+            setTranscricao(prev => {
+              const nova = (prev + '\n\n--- [Bloco ' + numero + ': ' + tempoInicio + ' às ' + tempoFim + '] ---\n' + textoTranscrito).trim();
+              return nova;
+            });
+          }
+
+          setSegmentos(prev => prev.map(s => s.id === segId ? {
+            ...s,
+            status: 'concluido',
+            mp3Blob: mp3Blob || blob,
+            mp3Url: mp3Url || URL.createObjectURL(blob),
+            transcricao: textoTranscrito || '[Nenhuma fala identificada]'
+          } : s));
+        } catch (err) {
+          setSegmentos(prev => prev.map(s => s.id === segId ? { ...s, status: 'erro' } : s));
+        }
+      }
+
+      function iniciarGravadorBloco(numero, inicioSeg) {
+        if (!streamRef.current) return;
+        currentBlockChunksRef.current = [];
+        blocoNumeroRef.current = numero;
+        blocoInicioSecRef.current = inicioSeg;
+        setBlocoAtualNumero(numero);
+        setSegundosNoBloco(0);
+        tempoAcumuladoBlocoRef.current = 0;
+        inicioBlocoRef.current = Date.now();
+
+        const rec = new MediaRecorder(streamRef.current);
+        rec.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) {
+            currentBlockChunksRef.current.push(e.data);
+            masterChunksRef.current.push(e.data);
+          }
+        };
+        rec.start(1000);
+        recRef.current = rec;
+      }
+
+      function rotacionarSegmento5Min() {
+        if (!recRef.current || !streamRef.current) return;
+        const numAtual = blocoNumeroRef.current;
+        const inicioSeg = blocoInicioSecRef.current;
+        const fimSeg = inicioSeg + DURACAO_BLOCO;
+        const tempoInicio = fmtSegundos(inicioSeg);
+        const tempoFim = fmtSegundos(fimSeg);
+        const segId = 'seg_' + numAtual + '_' + Date.now();
+        const oldRec = recRef.current;
+        const segChunks = [...currentBlockChunksRef.current];
+
+        // Inicia próximo bloco sem perder captura
+        iniciarGravadorBloco(numAtual + 1, fimSeg);
+
+        oldRec.onstop = () => {
+          const segBlob = new Blob(segChunks, { type: oldRec.mimeType || 'audio/webm' });
+          const novoSeg = {
+            id: segId,
+            numero: numAtual,
+            tempoInicio,
+            tempoFim,
+            blobWebm: segBlob,
+            status: 'convertendo'
+          };
+          setSegmentos(prev => [...prev, novoSeg]);
+          mostrarAviso('⏳ Bloco ' + numAtual + ' (' + tempoInicio + '-' + tempoFim + ') gravado! Convertendo em MP3 e transcrevendo...');
+          processarSegmento(segId, numAtual, tempoInicio, tempoFim, segBlob);
+        };
+
+        try { oldRec.stop(); } catch (e) {}
+      }
+
+      // Gravador de áudio com suporte a blocos de 5 min, pausa/retomada e MP3
+      async function iniciarGravacao() {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          streamRef.current = stream;
+          masterChunksRef.current = [];
+          currentBlockChunksRef.current = [];
+          setSegmentos([]);
+          setMasterMp3Blob(null);
+          setMasterMp3Url(null);
+          setAudioUrl(null);
+          setAudioBlob(null);
+          setSegundos(0);
+          setSegundosNoBloco(0);
+          tempoAcumuladoTotalRef.current = 0;
+          tempoAcumuladoBlocoRef.current = 0;
+          inicioGravacaoTotalRef.current = Date.now();
+          inicioBlocoRef.current = Date.now();
+          setPausado(false);
+
+          // Audio keep-alive para celular não suspender gravação com tela bloqueada
+          try {
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (AudioContextClass) {
+              const actx = new AudioContextClass();
+              const osc = actx.createOscillator();
+              const gain = actx.createGain();
+              gain.gain.setValueAtTime(0.00001, actx.currentTime);
+              osc.connect(gain);
+              gain.connect(actx.destination);
+              osc.start();
+              actxRef.current = actx;
+            }
+          } catch {}
+
+          if ('wakeLock' in navigator) {
+            try {
+              wakeLockRef.current = await navigator.wakeLock.request('screen');
+            } catch {}
+          }
+
+          iniciarGravadorBloco(1, 0);
+          setGravando(true);
+          setPausado(false);
+
+          clearInterval(timerRelRef.current);
+          timerRelRef.current = setInterval(() => {
+            const decorridoTotal = tempoAcumuladoTotalRef.current + Math.floor((Date.now() - inicioGravacaoTotalRef.current) / 1000);
+            setSegundos(decorridoTotal);
+
+            const decorridoBloco = tempoAcumuladoBlocoRef.current + Math.floor((Date.now() - inicioBlocoRef.current) / 1000);
+            setSegundosNoBloco(decorridoBloco);
+
+            if (decorridoBloco >= DURACAO_BLOCO) {
+              rotacionarSegmento5Min();
+            }
+          }, 1000);
+
+          mostrarAviso('🎙️ Gravação iniciada! A cada 5 minutos gera bloco independente em MP3 com transcrição automática.');
+        } catch (err) {
+          alert('Não foi possível acessar o microfone: ' + err.message);
+        }
+      }
+
+      function pausarGravacao() {
+        if (!recRef.current || recRef.current.state !== 'recording') return;
+        recRef.current.pause();
+        clearInterval(timerRelRef.current);
+        tempoAcumuladoTotalRef.current += Math.floor((Date.now() - inicioGravacaoTotalRef.current) / 1000);
+        tempoAcumuladoBlocoRef.current += Math.floor((Date.now() - inicioBlocoRef.current) / 1000);
+        setPausado(true);
+        mostrarAviso('⏸️ Gravação pausada na mesma consulta.');
+      }
+
+      function retomarGravacao() {
+        if (!recRef.current || recRef.current.state !== 'paused') return;
+        inicioGravacaoTotalRef.current = Date.now();
+        inicioBlocoRef.current = Date.now();
+        recRef.current.resume();
+        setPausado(false);
+
+        clearInterval(timerRelRef.current);
+        timerRelRef.current = setInterval(() => {
+          const decorridoTotal = tempoAcumuladoTotalRef.current + Math.floor((Date.now() - inicioGravacaoTotalRef.current) / 1000);
+          setSegundos(decorridoTotal);
+
+          const decorridoBloco = tempoAcumuladoBlocoRef.current + Math.floor((Date.now() - inicioBlocoRef.current) / 1000);
+          setSegundosNoBloco(decorridoBloco);
+
+          if (decorridoBloco >= DURACAO_BLOCO) {
+            rotacionarSegmento5Min();
+          }
+        }, 1000);
+
+        mostrarAviso('▶️ Gravação retomada.');
+      }
+
+      async function pararGravacao() {
+        clearInterval(timerRelRef.current);
+        setGravando(false);
+        setPausado(false);
+
+        const numFinal = blocoNumeroRef.current;
+        const inicioSegFinal = blocoInicioSecRef.current;
+        const tempoTotalFinal = segundos;
+        const duracaoBlocoFinal = tempoTotalFinal - inicioSegFinal;
+        const lastBlockChunks = [...currentBlockChunksRef.current];
+
+        if (recRef.current && recRef.current.state !== 'inactive') {
+          try { recRef.current.stop(); } catch (e) {}
+        }
+        if (streamRef.current) {
+          try { streamRef.current.getTracks().forEach(t => t.stop()); } catch (e) {}
+          streamRef.current = null;
+        }
+        if (actxRef.current) {
+          try { actxRef.current.close(); } catch (e) {}
+          actxRef.current = null;
+        }
+        if (wakeLockRef.current) {
+          try { wakeLockRef.current.release(); } catch (e) {}
+          wakeLockRef.current = null;
+        }
+
+        // Processa bloco final se durou > 1s
+        if (duracaoBlocoFinal >= 1 && lastBlockChunks.length > 0) {
+          const finalBlob = new Blob(lastBlockChunks, { type: 'audio/webm' });
+          const segId = 'seg_' + numFinal + '_' + Date.now();
+          const tempoInicio = fmtSegundos(inicioSegFinal);
+          const tempoFim = fmtSegundos(tempoTotalFinal);
+          const finalSeg = {
+            id: segId,
+            numero: numFinal,
+            tempoInicio,
+            tempoFim,
+            blobWebm: finalBlob,
+            status: 'convertendo'
+          };
+          setSegmentos(prev => [...prev, finalSeg]);
+          processarSegmento(segId, numFinal, tempoInicio, tempoFim, finalBlob);
+        }
+
+        // Gera MP3 Master da consulta inteira
+        setProcessandoMaster(true);
+        try {
+          const masterBlob = new Blob(masterChunksRef.current, { type: 'audio/webm' });
+          setAudioBlob(masterBlob);
+          setAudioUrl(URL.createObjectURL(masterBlob));
+
+          const masterBase64 = await blobParaBase64(masterBlob);
+          const convRes = await fetch(API_BASE + '/api/audio/convert-mp3', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ audioBase64: masterBase64, mimeType: 'audio/webm' })
+          });
+          if (convRes.ok) {
+            const data = await convRes.json();
+            const mp3Blob = base64ToBlob(data.mp3Base64, 'audio/mp3');
+            setMasterMp3Blob(mp3Blob);
+            setMasterMp3Url(URL.createObjectURL(mp3Blob));
+          }
+        } catch (e) {
+          console.warn('Erro ao gerar master MP3:', e);
+        } finally {
+          setProcessandoMaster(false);
+        }
+
+        mostrarAviso('Áudio da consulta finalizado! Todos os arquivos em .MP3 disponíveis para download.');
+      }
+
+      function baixarMasterMp3() {
+        if (!masterMp3Blob && !audioBlob) return;
+        const nomePaciente = patient.nome ? patient.nome.replace(/\s+/g, '_') : 'consulta';
+        const blobToDownload = masterMp3Blob || audioBlob;
+        baixarBlobMp3(blobToDownload, 'consulta_' + nomePaciente + '_COMPLETA_' + hojeISO() + '.mp3');
+      }
+
+      function baixarBlocoMp3(seg) {
+        const blobToDownload = seg.mp3Blob || seg.blobWebm;
+        if (!blobToDownload) return;
+        const nomePaciente = patient.nome ? patient.nome.replace(/\s+/g, '_') : 'consulta';
+        const tempoLimpo = seg.tempoInicio.replace(':', 'm') + '-' + seg.tempoFim.replace(':', 'm');
+        baixarBlobMp3(blobToDownload, 'consulta_' + nomePaciente + '_bloco_' + seg.numero + '_' + tempoLimpo + '.mp3');
+      }
+
+      // Carregar exemplo Thor
+      function carregarExemplo() {
+        setPatient({
+          nome: 'Thor',
+          especie: 'Canina',
+          raca: 'Shih-tzu',
+          sexo: 'Macho',
+          idade: '6 anos',
+          tutor: 'Carlos Silva',
+        });
+        setLocation({ data: hojeISO(), tipoConsulta: 'Primeira Consulta' });
+        setChiefComplaint('Tutor relata olho direito vermelho e irritado há 3 dias com secreção mucosa abundante e blefaroespasmo.');
+        setExamsOD({
+          schirmer: '8',
+          pio: '14',
+          conjuntiva: 'hiperêmica moderada com secreção mucosa',
+          cornea: 'descontinuidade epitelial em terço inferior',
+          fluoresceina: 'positivo',
+        });
+        setExamsOE({
+          schirmer: '19',
+          pio: '15',
+          conjuntiva: '',
+          cornea: '',
+        });
+        setTratamentoOral('Cefalexina comp 500mg, 1/2, bid, 10d');
+        setTratamentoOD('Tobramicina 0,3% colírio tid 10d\nPomada Ciclosporina 1% bid 30d');
+        setTratamentoOE('Lubrificante colírio tid uso contínuo');
+        setRetornoOuAlta('Retorno em 7 dias para novo teste de fluoresceína e reavaliação corneana.');
+        setDiagnostico('Ceratoconjuntivite Seca (CCS) e Úlcera de Córnea Superficial em OD.');
+        mostrarAviso('🧪 Exemplo do paciente Thor carregado com sucesso!');
+      }
+
+      function novaConsulta() {
+        if (!confirm('Deseja iniciar uma nova consulta em branco?')) return;
+        setPatient({ nome: '', especie: '', raca: '', sexo: '', idade: '', tutor: '' });
+        setLocation({ data: hojeISO(), tipoConsulta: 'Consulta' });
+        setChiefComplaint('');
+        setExamsOD({});
+        setExamsOE({});
+        setExamesComplementares({});
+        setTratamentoOral('');
+        setTratamentoOD('');
+        setTratamentoOE('');
+        setRetornoOuAlta('');
+        setDiagnostico('');
+        setConsulta(null);
+        setAudioUrl(null);
+        setAudioBlob(null);
+        setFichaId(null);
+        setAtendId(null);
+        setFichaAtual(null);
+        mostrarAviso('Nova ficha em branco iniciada.');
+      }
+
+      async function salvarFicha() {
+        if (!patient.nome.trim()) {
+          alert('Por favor, informe pelo menos o nome do paciente.');
+          return;
+        }
+
+        setSalvando(true);
+        try {
+          let ficha = fichaId ? await FichasDB.obter(fichaId) : null;
+          if (!ficha) {
+            ficha = {
+              id: novoId(),
+              criadoEm: Date.now(),
+              paciente: { ...patient },
+              atendimentos: [],
+            };
+          }
+
+          const idAt = atendId || novoId();
+          const atendimento = {
+            id: idAt,
+            data: location.data || hojeISO(),
+            patient: { ...patient },
+            location: { ...location },
+            chiefComplaint,
+            examsOD,
+            examsOE,
+            examesComplementares,
+            tratamentoOral,
+            tratamentoOD,
+            tratamentoOE,
+            retornoOuAlta,
+            diagnostico,
+            consulta,
+          };
+
+          const idx = ficha.atendimentos.findIndex((a) => a.id === idAt);
+          if (idx >= 0) {
+            ficha.atendimentos[idx] = atendimento;
+          } else {
+            ficha.atendimentos.push(atendimento);
+          }
+
+          ficha.paciente = { ...patient };
+          ficha.atualizadoEm = Date.now();
+
+          await FichasDB.salvar(ficha);
+          setFichaId(ficha.id);
+          setAtendId(idAt);
+          setFichaAtual(ficha);
+          mostrarAviso(`✅ Ficha de ${patient.nome} salva no seu navegador!`);
+        } catch (e) {
+          alert('Erro ao salvar no banco local: ' + e.message);
+        } finally {
+          setSalvando(false);
+        }
+      }
+
+      return (
+        <div className="p-3 sm:p-6 max-w-5xl mx-auto">
+          {/* Header */}
+          <header className="bg-white rounded-2xl p-5 mb-5 shadow-sm border border-slate-200 flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-12 h-12 rounded-xl bg-blue-600 flex items-center justify-center text-white text-2xl font-bold shadow-md shadow-blue-500/20">
+                👁️
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-xl md:text-2xl font-black text-slate-900 tracking-tight">
+                    Ficha Oftalmológica Veterinária
+                  </h1>
+                  <span className="px-2 py-0.5 text-xs font-semibold bg-blue-50 text-blue-700 rounded-md border border-blue-200">
+                    HVA
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 font-medium">
+                  Hospital Veterinário de Araçatuba · Sistema Portátil Standalone
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 px-4 py-2 rounded-xl border border-slate-200 text-right sm:text-left">
+              <div className="text-xs font-bold text-slate-800">Dr. Adélio Gurgel do Amaral Jr.</div>
+              <div className="text-[11px] text-slate-500 font-medium">CRMV-SP 18.721</div>
+            </div>
+          </header>
+
+          {/* Barra de Ações Superior */}
+          <div className="sticky top-2 z-30 mb-5 bg-white/95 backdrop-blur-sm rounded-2xl shadow-md border border-slate-200 p-3 flex flex-wrap items-center justify-between gap-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={salvarFicha}
+                disabled={salvando}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs md:text-sm font-semibold shadow-xs transition-all active:scale-95"
+              >
+                💾 Salvar Ficha
+              </button>
+
+              <button
+                onClick={novaConsulta}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs md:text-sm font-semibold shadow-xs transition-all active:scale-95"
+              >
+                ➕ Nova Consulta
+              </button>
+
+              <button
+                onClick={carregarExemplo}
+                className="px-3.5 py-2 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 rounded-xl text-xs md:text-sm font-semibold transition-all active:scale-95"
+              >
+                🧪 Exemplo de Teste
+              </button>
+
+              <button
+                onClick={() => setModalBusca(true)}
+                className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 rounded-xl text-xs md:text-sm font-semibold transition-all active:scale-95"
+              >
+                🔍 Buscar Fichas
+              </button>
+
+              <button
+                onClick={() => setModalFotoCelular(true)}
+                title="Conectar câmera de outro celular para enviar fotos direto para este prontuário"
+                className="px-3.5 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-xl text-xs md:text-sm font-semibold transition-all active:scale-95 flex items-center gap-1.5"
+              >
+                <span>📲</span> Fotos do 2º Celular
+              </button>
+            </div>
+
+            {fichaId && (
+              <span className="text-xs font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
+                ✓ Ficha Salva no Aparelho
+              </span>
+            )}
+          </div>
+
+          {/* Identificação do Paciente */}
+          <section className="bg-white rounded-2xl p-5 mb-5 shadow-sm border border-slate-200">
+            <div className="flex items-center justify-between mb-3 pb-2 border-b border-slate-100 flex-wrap gap-2">
+              <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                <span>👤</span> Identificação do Paciente
+              </h2>
+              <button
+                type="button"
+                onClick={() => setModalFotoSistema(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 font-semibold text-xs border border-blue-200 shadow-2xs transition-all active:scale-95"
+                title="Tirar foto da tela do sistema do hospital ou colar print para extrair dados com IA"
+              >
+                <span>📸</span> Foto do Sistema Hospitalar
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Nome do Paciente *</label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-medium focus:ring-2 focus:ring-blue-500/20"
+                  placeholder="Ex: Thor"
+                  value={patient.nome}
+                  onChange={(e) => setPatient({ ...patient, nome: e.target.value })}
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Tutor(a)</label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-blue-500/20"
+                  placeholder="Ex: Carlos Silva"
+                  value={patient.tutor}
+                  onChange={(e) => setPatient({ ...patient, tutor: e.target.value })}
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Espécie</label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-blue-500/20"
+                  placeholder="Ex: Canina, Felina"
+                  value={patient.especie}
+                  onChange={(e) => setPatient({ ...patient, especie: e.target.value })}
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Raça</label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-blue-500/20"
+                  placeholder="Ex: Shih-tzu"
+                  value={patient.raca}
+                  onChange={(e) => setPatient({ ...patient, raca: e.target.value })}
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Sexo</label>
+                <select
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-sm focus:ring-2 focus:ring-blue-500/20"
+                  value={patient.sexo}
+                  onChange={(e) => setPatient({ ...patient, sexo: e.target.value })}
+                >
+                  <option value="">Selecione...</option>
+                  <option value="Macho">Macho</option>
+                  <option value="Fêmea">Fêmea</option>
+                  <option value="Macho (Castrado)">Macho (Castrado)</option>
+                  <option value="Fêmea (Castrada)">Fêmea (Castrada)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Idade / Nascimento</label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-blue-500/20"
+                  placeholder="Ex: 6 anos"
+                  value={patient.idade}
+                  onChange={(e) => setPatient({ ...patient, idade: e.target.value })}
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Data da Consulta</label>
+                <input
+                  type="date"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-blue-500/20"
+                  value={location.data}
+                  onChange={(e) => setLocation({ ...location, data: e.target.value })}
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Tipo de Consulta</label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-blue-500/20"
+                  placeholder="Ex: Primeira Consulta, Retorno"
+                  value={location.tipoConsulta}
+                  onChange={(e) => setLocation({ ...location, tipoConsulta: e.target.value })}
+                />
+              </div>
+            </div>
+          </section>
+
+          {/* Gravação & Escuta Inteligente com Blocos de 5 Minutos (.MP3) */}
+          <section className="bg-white rounded-2xl p-5 mb-5 shadow-sm border border-slate-200">
+            <div className="flex items-center justify-between mb-3 pb-2 border-b border-slate-100">
+              <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                <span>🎙️</span> Gravação & Transcrição em Blocos de 5 Min (.MP3)
+              </h2>
+              <span className="text-xs text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200 font-semibold">
+                Áudio em formato .MP3
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5 mb-3">
+              {!gravando ? (
+                <button
+                  onClick={iniciarGravacao}
+                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs md:text-sm font-semibold shadow-xs flex items-center gap-1.5 active:scale-[0.98]"
+                >
+                  <span>🎙️</span> Iniciar Gravação da Consulta
+                </button>
+              ) : (
+                <>
+                  {!pausado ? (
+                    <button
+                      onClick={pausarGravacao}
+                      className="px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs md:text-sm font-semibold shadow-xs flex items-center gap-1.5"
+                      title="Pausar a gravação momentaneamente sem fechar o arquivo"
+                    >
+                      <span>⏸️</span> Pausar
+                    </button>
+                  ) : (
+                    <button
+                      onClick={retomarGravacao}
+                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs md:text-sm font-semibold shadow-xs flex items-center gap-1.5 animate-pulse"
+                      title="Retomar a gravação nesta mesma consulta"
+                    >
+                      <span>▶️</span> Retomar
+                    </button>
+                  )}
+
+                  <button
+                    onClick={pararGravacao}
+                    className="px-4 py-2 bg-slate-900 hover:bg-black text-white rounded-xl text-xs md:text-sm font-semibold shadow-xs flex items-center gap-1.5"
+                  >
+                    <span>⏹️</span> Finalizar Consulta ({fmtSegundos(segundos)})
+                    {pausado && <span className="text-amber-300 text-xs ml-1">(Pausado)</span>}
+                  </button>
+                </>
+              )}
+
+              {/* Indicador do Bloco Atual */}
+              {gravando && !pausado && (
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-red-50 text-red-800 border border-red-200 text-xs font-semibold">
+                  <span className="w-2 h-2 rounded-full bg-red-600 animate-ping"></span>
+                  <span>Bloco {blocoAtualNumero}: {fmtSegundos(segundosNoBloco)} / 05:00</span>
+                  <span className="text-[11px] text-slate-500 hidden sm:inline">(próximo bloco em {fmtSegundos(Math.max(0, 300 - segundosNoBloco))})</span>
+                </div>
+              )}
+
+              <button
+                onClick={() => setModalNotebook(true)}
+                className="px-4 py-2 bg-purple-50 hover:bg-purple-100 text-purple-800 border border-purple-200 rounded-xl text-xs md:text-sm font-semibold shadow-2xs flex items-center gap-1.5 ml-auto"
+              >
+                <span>📋</span> Colar do NotebookLM
+              </button>
+            </div>
+
+            {/* Master Player: Consulta Completa em MP3 */}
+            {(masterMp3Url || audioUrl || processandoMaster) && !gravando && (
+              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-4 rounded-xl border-2 border-blue-200 mb-3 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
+                <div className="flex-1 min-w-[220px]">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs font-bold text-slate-900">🎧 Áudio da Consulta Inteira (.MP3):</span>
+                    <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">Formato .MP3</span>
+                    {segundos > 0 && <span className="text-xs text-slate-600 font-mono">Duração: {fmtSegundos(segundos)}</span>}
+                  </div>
+                  {processandoMaster ? (
+                    <span className="text-xs text-blue-700 animate-pulse">Convertendo áudio completo em MP3...</span>
+                  ) : (
+                    <audio src={masterMp3Url || audioUrl} controls className="w-full h-8 mt-1" />
+                  )}
+                </div>
+                <button
+                  onClick={baixarMasterMp3}
+                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 shrink-0"
+                >
+                  <span>⬇️</span> Baixar Consulta Completa (.mp3)
+                </button>
+              </div>
+            )}
+
+            {/* Lista de Blocos de 5 Minutos */}
+            {segmentos.length > 0 && (
+              <div className="mt-3 pt-3 border-t border-slate-100">
+                <h3 className="text-xs font-bold text-slate-700 uppercase mb-2 flex items-center gap-1">
+                  <span>📂</span> Blocos de 5 Minutos da Consulta ({segmentos.length} {segmentos.length === 1 ? 'bloco' : 'blocos'})
+                </h3>
+                <div className="space-y-2">
+                  {segmentos.map((seg) => (
+                    <div key={seg.id} className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2.5">
+                      <div className="flex items-center gap-2">
+                        <span className="bg-slate-200 text-slate-800 text-xs font-bold px-2 py-0.5 rounded-md">#{seg.numero}</span>
+                        <span className="text-xs font-bold text-slate-800">Bloco {seg.numero} ({seg.tempoInicio} às {seg.tempoFim})</span>
+                        {seg.status === 'convertendo' && <span className="text-[11px] text-amber-600 font-semibold">Convertendo MP3...</span>}
+                        {seg.status === 'transcrevendo' && <span className="text-[11px] text-blue-600 font-semibold animate-pulse">Transcrevendo...</span>}
+                        {seg.status === 'concluido' && <span className="text-[11px] text-emerald-600 font-semibold">✓ Concluído (.MP3)</span>}
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        {(seg.mp3Url || seg.blobWebm) && (
+                          <audio src={seg.mp3Url || URL.createObjectURL(seg.blobWebm)} controls className="h-7 w-48 sm:w-56" />
+                        )}
+                        <button
+                          onClick={() => baixarBlocoMp3(seg)}
+                          className="px-2.5 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 rounded-lg text-xs font-semibold"
+                          title="Baixar este bloco em MP3"
+                        >
+                          ⬇️ MP3
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
+
+          {/* Queixa Principal */}
+          <section className="bg-white rounded-2xl p-5 mb-5 shadow-sm border border-slate-200">
+            <h2 className="text-base font-bold text-slate-900 mb-2 flex items-center gap-2">
+              <span>📝</span> Queixa Principal & Histórico
+            </h2>
+            <div
+              onClick={() => setModalQueixa(true)}
+              className="p-3.5 rounded-xl border border-slate-300 bg-slate-50/50 cursor-pointer hover:border-blue-400 min-h-[60px] text-sm text-slate-800"
+            >
+              {chiefComplaint ? chiefComplaint : <span className="italic text-slate-400">Clique para digitar a queixa ou cole do NotebookLM...</span>}
+            </div>
+          </section>
+
+          {/* Exame Oftalmológico Bilateral */}
+          <section className="bg-white rounded-2xl p-5 mb-5 shadow-sm border border-slate-200">
+            <h2 className="text-base font-bold text-slate-900 mb-4 pb-2 border-b border-slate-100 flex items-center gap-2">
+              <span>👁️</span> Exame Oftalmológico Bilateral
+            </h2>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* OD */}
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                <h3 className="font-bold text-sm text-blue-900 mb-3 flex items-center gap-2">
+                  <span className="bg-blue-600 text-white text-xs px-2 py-0.5 rounded-md font-bold">OD</span>
+                  Olho Direito
+                </h3>
+
+                <div className="grid grid-cols-2 gap-2 mb-3">
+                  <div className="bg-white p-2.5 rounded-lg border border-slate-200">
+                    <label className="block text-[11px] font-bold text-slate-600">Schirmer (mm/min)</label>
+                    <input
+                      type="text"
+                      className="w-full text-sm font-semibold border-b border-slate-200 focus:outline-none"
+                      placeholder="Ex: 18"
+                      value={examsOD.schirmer || ''}
+                      onChange={(e) => setExamsOD({ ...examsOD, schirmer: e.target.value })}
+                    />
+                    {examsOD.schirmer && (
+                      <span className={`text-[10px] font-bold ${interpretSchirmer(examsOD.schirmer) === 'Normal' ? 'text-emerald-600' : 'text-red-600'}`}>
+                        {interpretSchirmer(examsOD.schirmer)}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="bg-white p-2.5 rounded-lg border border-slate-200">
+                    <label className="block text-[11px] font-bold text-slate-600">PIO (mmHg)</label>
+                    <input
+                      type="text"
+                      className="w-full text-sm font-semibold border-b border-slate-200 focus:outline-none"
+                      placeholder="Ex: 15"
+                      value={examsOD.pio || ''}
+                      onChange={(e) => setExamsOD({ ...examsOD, pio: e.target.value })}
+                    />
+                    {examsOD.pio && (
+                      <span className={`text-[10px] font-bold ${interpretPio(examsOD.pio) === 'Normal' ? 'text-emerald-600' : 'text-red-600'}`}>
+                        {interpretPio(examsOD.pio)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">Estruturas Anatômicas:</label>
+                <div className="grid grid-cols-2 gap-1.5 mb-3">
+                  {ESTRUTURAS.map((est) => {
+                    const preenchido = !!(examsOD[est.key] && examsOD[est.key].trim());
+                    return (
+                      <button
+                        key={est.key}
+                        onClick={() => setModalExame({ lado: 'OD', key: est.key, titulo: `${est.label} - OD`, valor: examsOD[est.key] || '' })}
+                        className={`text-left px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-all ${preenchido ? 'bg-rose-50 border-rose-300 text-rose-950' : 'bg-white border-slate-200 text-slate-700'}`}
+                      >
+                        {est.label} {preenchido && '✓'}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">Testes da Córnea:</label>
+                <div className="grid grid-cols-3 gap-1">
+                  {TESTES_CORNEA.map((t) => {
+                    const preenchido = !!(examsOD[t.key] && examsOD[t.key].trim());
+                    return (
+                      <button
+                        key={t.key}
+                        onClick={() => setModalExame({ lado: 'OD', key: t.key, titulo: `${t.label} - OD`, valor: examsOD[t.key] || '' })}
+                        className={`text-center p-1 rounded-lg text-[11px] font-semibold border ${preenchido ? 'bg-rose-50 border-rose-300 text-rose-950' : 'bg-white border-slate-200 text-slate-700'}`}
+                      >
+                        {t.label} {preenchido && '✓'}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* OE */}
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                <h3 className="font-bold text-sm text-indigo-900 mb-3 flex items-center gap-2">
+                  <span className="bg-indigo-600 text-white text-xs px-2 py-0.5 rounded-md font-bold">OE</span>
+                  Olho Esquerdo
+                </h3>
+
+                <div className="grid grid-cols-2 gap-2 mb-3">
+                  <div className="bg-white p-2.5 rounded-lg border border-slate-200">
+                    <label className="block text-[11px] font-bold text-slate-600">Schirmer (mm/min)</label>
+                    <input
+                      type="text"
+                      className="w-full text-sm font-semibold border-b border-slate-200 focus:outline-none"
+                      placeholder="Ex: 18"
+                      value={examsOE.schirmer || ''}
+                      onChange={(e) => setExamsOE({ ...examsOE, schirmer: e.target.value })}
+                    />
+                    {examsOE.schirmer && (
+                      <span className={`text-[10px] font-bold ${interpretSchirmer(examsOE.schirmer) === 'Normal' ? 'text-emerald-600' : 'text-red-600'}`}>
+                        {interpretSchirmer(examsOE.schirmer)}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="bg-white p-2.5 rounded-lg border border-slate-200">
+                    <label className="block text-[11px] font-bold text-slate-600">PIO (mmHg)</label>
+                    <input
+                      type="text"
+                      className="w-full text-sm font-semibold border-b border-slate-200 focus:outline-none"
+                      placeholder="Ex: 15"
+                      value={examsOE.pio || ''}
+                      onChange={(e) => setExamsOE({ ...examsOE, pio: e.target.value })}
+                    />
+                    {examsOE.pio && (
+                      <span className={`text-[10px] font-bold ${interpretPio(examsOE.pio) === 'Normal' ? 'text-emerald-600' : 'text-red-600'}`}>
+                        {interpretPio(examsOE.pio)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">Estruturas Anatômicas:</label>
+                <div className="grid grid-cols-2 gap-1.5 mb-3">
+                  {ESTRUTURAS.map((est) => {
+                    const preenchido = !!(examsOE[est.key] && examsOE[est.key].trim());
+                    return (
+                      <button
+                        key={est.key}
+                        onClick={() => setModalExame({ lado: 'OE', key: est.key, titulo: `${est.label} - OE`, valor: examsOE[est.key] || '' })}
+                        className={`text-left px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-all ${preenchido ? 'bg-rose-50 border-rose-300 text-rose-950' : 'bg-white border-slate-200 text-slate-700'}`}
+                      >
+                        {est.label} {preenchido && '✓'}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">Testes da Córnea:</label>
+                <div className="grid grid-cols-3 gap-1">
+                  {TESTES_CORNEA.map((t) => {
+                    const preenchido = !!(examsOE[t.key] && examsOE[t.key].trim());
+                    return (
+                      <button
+                        key={t.key}
+                        onClick={() => setModalExame({ lado: 'OE', key: t.key, titulo: `${t.label} - OE`, valor: examsOE[t.key] || '' })}
+                        className={`text-center p-1 rounded-lg text-[11px] font-semibold border ${preenchido ? 'bg-rose-50 border-rose-300 text-rose-950' : 'bg-white border-slate-200 text-slate-700'}`}
+                      >
+                        {t.label} {preenchido && '✓'}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* Tratamento & Prescrição */}
+          <section className="bg-white rounded-2xl p-5 mb-5 shadow-sm border border-slate-200">
+            <h2 className="text-base font-bold text-slate-900 mb-3 pb-2 border-b border-slate-100 flex items-center gap-2">
+              <span>💊</span> Conduta Terapêutica & Prescrição
+            </h2>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Tratamento por Via Oral</label>
+                <textarea
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                  rows={2}
+                  placeholder="Ex: Cefalexina comp 500mg, 1, bid, 10d"
+                  value={tratamentoOral}
+                  onChange={(e) => setTratamentoOral(e.target.value)}
+                />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Tópico - Olho Direito (OD)</label>
+                  <textarea
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-medium focus:ring-2 focus:ring-blue-500/20"
+                    rows={2}
+                    placeholder="Ex: Tobramicina 0,3% bid 10d"
+                    value={tratamentoOD}
+                    onChange={(e) => setTratamentoOD(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Tópico - Olho Esquerdo (OE)</label>
+                  <textarea
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-medium focus:ring-2 focus:ring-indigo-500/20"
+                    rows={2}
+                    placeholder="Ex: Tobramicina 0,3% bid 10d"
+                    value={tratamentoOE}
+                    onChange={(e) => setTratamentoOE(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-slate-100">
+                <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
+                  <span>🗓️ Conduta / Retorno ou Alta Médica (Resumo do Atendimento)</span>
+                  <span className="text-[11px] text-slate-400 font-normal">Aparece no final do relatório</span>
+                </label>
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {['Retorno em 7 dias', 'Retorno em 15 dias', 'Retorno em 30 dias', 'Retorno se piora', 'Alta Médica'].map((opt) => (
+                    <button
+                      key={opt}
+                      type="button"
+                      onClick={() => setRetornoOuAlta(opt)}
+                      className={`text-xs px-2.5 py-1 rounded-lg border font-medium ${retornoOuAlta.includes(opt) ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'}`}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-medium focus:ring-2 focus:ring-blue-500/20"
+                  placeholder="Ex: Retorno em 7 dias para novo teste de fluoresceína (ou Alta Médica)"
+                  value={retornoOuAlta}
+                  onChange={(e) => setRetornoOuAlta(e.target.value)}
+                />
+              </div>
+            </div>
+          </section>
+
+          {/* Diagnóstico */}
+          <section className="bg-white rounded-2xl p-5 mb-5 shadow-sm border border-slate-200">
+            <h2 className="text-base font-bold text-slate-900 mb-2 flex items-center gap-2">
+              <span>🎯</span> Diagnóstico Definitivo / Suspeita Clínica
+            </h2>
+            <div
+              onClick={() => setModalDiagnostico(true)}
+              className="p-3.5 rounded-xl border border-slate-300 bg-slate-50/50 cursor-pointer hover:border-blue-400 min-h-[60px] text-sm text-slate-800 font-medium"
+            >
+              {diagnostico ? diagnostico : <span className="italic text-slate-400">Clique para digitar o diagnóstico clínico...</span>}
+            </div>
+          </section>
+
+          {/* Botões de Relatórios e Receituário */}
+          <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 flex flex-wrap items-center justify-center gap-3">
+            <button
+              onClick={() => setModalReceita(true)}
+              className="px-5 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold shadow-xs active:scale-95"
+            >
+              📋 Gerar Receituário
+            </button>
+
+            <button
+              onClick={() => setModalRelatorioTutor(true)}
+              className="px-5 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold shadow-xs active:scale-95"
+            >
+              📄 Relatório para o Tutor
+            </button>
+
+            <button
+              onClick={() => setModalRelatorioProntuario(true)}
+              className="px-5 py-3 bg-indigo-700 hover:bg-indigo-800 text-white rounded-xl text-sm font-bold shadow-xs active:scale-95"
+            >
+              📋 Relatório Prontuário Médico
+            </button>
+          </div>
+
+          {/* Modal Exame / Estrutura */}
+          {modalExame && (
+            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setModalExame(null)}>
+              <div className="bg-white rounded-2xl p-5 w-full max-w-lg shadow-xl" onClick={(e) => e.stopPropagation()}>
+                <h3 className="font-bold text-base mb-2">{modalExame.titulo}</h3>
+                <textarea
+                  className="w-full h-32 p-3 border rounded-xl mb-3 text-sm"
+                  placeholder="Descreva as alterações encontradas..."
+                  value={modalExame.valor}
+                  onChange={(e) => setModalExame({ ...modalExame, valor: e.target.value })}
+                  autoFocus
+                />
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setModalExame(null)} className="px-4 py-2 text-slate-600 text-sm">Cancelar</button>
+                  <button
+                    onClick={() => {
+                      if (modalExame.lado === 'OD') {
+                        setExamsOD({ ...examsOD, [modalExame.key]: modalExame.valor });
+                      } else {
+                        setExamsOE({ ...examsOE, [modalExame.key]: modalExame.valor });
+                      }
+                      setModalExame(null);
+                    }}
+                    className="px-4 py-2 bg-blue-600 text-white rounded-xl text-sm font-semibold"
+                  >
+                    Salvar
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal Texto (Queixa / Diagnóstico) */}
+          {(modalQueixa || modalDiagnostico) && (
+            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => { setModalQueixa(false); setModalDiagnostico(false); }}>
+              <div className="bg-white rounded-2xl p-5 w-full max-w-lg shadow-xl" onClick={(e) => e.stopPropagation()}>
+                <h3 className="font-bold text-base mb-2">{modalQueixa ? 'Queixa Principal' : 'Diagnóstico'}</h3>
+                <textarea
+                  className="w-full h-40 p-3 border rounded-xl mb-3 text-sm"
+                  value={modalQueixa ? chiefComplaint : diagnostico}
+                  onChange={(e) => modalQueixa ? setChiefComplaint(e.target.value) : setDiagnostico(e.target.value)}
+                  autoFocus
+                />
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => { setModalQueixa(false); setModalDiagnostico(false); }} className="px-4 py-2 bg-blue-600 text-white rounded-xl text-sm font-semibold">
+                    Concluir
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal Colar NotebookLM */}
+          {modalNotebook && (
+            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setModalNotebook(false)}>
+              <div className="bg-white rounded-2xl p-5 w-full max-w-2xl shadow-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+                <h3 className="font-bold text-base text-purple-900 mb-2">📋 Colar do NotebookLM / Gemini</h3>
+                <p className="text-xs text-slate-500 mb-3">Cole o texto avaliado pelo NotebookLM para preencher os campos automaticamente.</p>
+                <textarea
+                  id="notebookText"
+                  className="w-full flex-1 min-h-[220px] p-3 border rounded-xl text-sm font-mono mb-3"
+                  placeholder="Cole aqui o texto do NotebookLM..."
+                />
+                <div className="flex justify-between items-center">
+                  <button onClick={() => setModalNotebook(false)} className="px-4 py-2 text-slate-600 text-sm">Cancelar</button>
+                  <button
+                    onClick={() => {
+                      const txt = document.getElementById('notebookText').value;
+                      if (!txt.trim()) return;
+
+                      // Parse aprimorado
+                      const linhas = txt.split('\n');
+                      let q = '', d = '', tOral = '', tOD = '', tOE = '', ret = '';
+                      linhas.forEach(l => {
+                        const lLow = l.toLowerCase();
+                        if (lLow.includes('queixa:')) q = l.split(':')[1]?.trim() || '';
+                        if (lLow.includes('diagnóstico:') || lLow.includes('diagnostico:')) d = l.split(':')[1]?.trim() || '';
+                        if (lLow.includes('oral:') || lLow.includes('tratamento oral:')) tOral = l.split(':')[1]?.trim() || '';
+                        if (lLow.includes('olho direito:') || lLow.includes('od:')) tOD = l.split(':')[1]?.trim() || '';
+                        if (lLow.includes('olho esquerdo:') || lLow.includes('oe:')) tOE = l.split(':')[1]?.trim() || '';
+                        if (lLow.includes('retorno:') || lLow.includes('alta:') || lLow.includes('conduta:')) ret = l.split(':')[1]?.trim() || '';
+                        if (!tOral && (lLow.includes('tratamento:') || lLow.includes('prescrição:'))) tOral = l.split(':')[1]?.trim() || '';
+                      });
+
+                      if (q) setChiefComplaint(q);
+                      if (d) setDiagnostico(d);
+                      if (tOral) setTratamentoOral(tOral);
+                      if (tOD) setTratamentoOD(tOD);
+                      if (tOE) setTratamentoOE(tOE);
+                      if (ret) setRetornoOuAlta(ret);
+                      setConsulta({ resumo: txt, geradoEm: new Date().toLocaleString('pt-BR') });
+
+                      setModalNotebook(false);
+                      mostrarAviso('Dados e receituário do NotebookLM importados!');
+                    }}
+                    className="px-5 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-sm font-semibold"
+                  >
+                    Inserir na Ficha
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal Receituário */}
+          {modalReceita && (
+            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setModalReceita(false)}>
+              <div className="bg-white rounded-2xl p-6 w-full max-w-2xl shadow-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+                <h3 className="font-bold text-lg text-emerald-950 mb-1">Receituário Médico Veterinário</h3>
+                <p className="text-xs text-slate-500 mb-3">Dr. Adélio Gurgel do Amaral Jr. · CRMV-SP 18.721</p>
+                <div className="flex-1 overflow-y-auto p-4 bg-slate-50 rounded-xl border border-slate-200 font-mono text-xs whitespace-pre-wrap leading-relaxed mb-4">
+{`RECEITUÁRIO MÉDICO VETERINÁRIO
+
+Paciente: ${patient.nome || 'Não informado'}   Espécie: ${patient.especie || '—'}   Raça: ${patient.raca || '—'}
+Tutor(a): ${patient.tutor || 'Não informado'}   Data: ${fmtData(location.data)}
+
+${tratamentoOral ? `USO ORAL:\n${tratamentoOral}\n\n` : ''}${tratamentoOD ? `USO TÓPICO - OLHO DIREITO (OD):\n${tratamentoOD}\n\n` : ''}${tratamentoOE ? `USO TÓPICO - OLHO ESQUERDO (OE):\n${tratamentoOE}\n\n` : ''}
+___________________________________________
+Dr. Adélio Gurgel do Amaral Jr.
+Médico Veterinário · CRMV-SP 18.721
+Hospital Veterinário de Araçatuba (HVA)`}
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setModalReceita(false)} className="px-4 py-2 text-slate-600 text-sm">Fechar</button>
+                  <button onClick={() => window.print()} className="px-5 py-2 bg-emerald-600 text-white rounded-xl text-sm font-semibold">
+                    🖨️ Imprimir
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal Relatório Tutor */}
+          {modalRelatorioTutor && (
+            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setModalRelatorioTutor(false)}>
+              <div className="bg-white rounded-2xl p-6 w-full max-w-3xl shadow-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+                <h3 className="font-bold text-lg text-blue-950 mb-1">Relatório Oftalmológico para o Tutor</h3>
+                <p className="text-xs text-slate-500 mb-3">Linguagem acessível e orientações</p>
+                <div className="flex-1 overflow-y-auto p-5 bg-slate-50 rounded-xl border border-slate-200 text-xs md:text-sm space-y-3 leading-relaxed mb-4">
+                  <div className="border-b pb-2">
+                    <strong>Paciente:</strong> {patient.nome || '—'} | <strong>Tutor:</strong> {patient.tutor || '—'} | <strong>Data:</strong> {fmtData(location.data)}
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-blue-900">Teste da Lágrima (Schirmer):</h4>
+                    <p>Olho Direito: {examsOD.schirmer || 'Não avaliado'} mm/min ({interpretSchirmer(examsOD.schirmer) || '—'})</p>
+                    <p>Olho Esquerdo: {examsOE.schirmer || 'Não avaliado'} mm/min ({interpretSchirmer(examsOE.schirmer) || '—'})</p>
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-blue-900">Pressão dos Olhos (PIO):</h4>
+                    <p>Olho Direito: {examsOD.pio || 'Não avaliado'} mmHg ({interpretPio(examsOD.pio) || '—'})</p>
+                    <p>Olho Esquerdo: {examsOE.pio || 'Não avaliado'} mmHg ({interpretPio(examsOE.pio) || '—'})</p>
+                  </div>
+                  {diagnostico && (
+                    <div className="bg-emerald-50 p-3 rounded-lg border border-emerald-200">
+                      <strong className="text-emerald-900 block mb-1">Diagnóstico Clínico:</strong>
+                      <p className="text-emerald-800">{diagnostico}</p>
+                    </div>
+                  )}
+
+                  {/* Resumo do Atendimento */}
+                  <div className="bg-blue-50/80 p-3.5 rounded-xl border-2 border-blue-200 mt-3 space-y-2">
+                    <h4 className="font-bold text-blue-950 text-sm border-b border-blue-200 pb-1">📌 Resumo do Atendimento</h4>
+                    <div>
+                      <strong className="text-blue-900 block text-xs">Diagnóstico Provável:</strong>
+                      <p className="text-slate-800 font-medium">{diagnostico || 'Sem alterações patológicas observadas no momento.'}</p>
+                    </div>
+                    <div>
+                      <strong className="text-blue-900 block text-xs">Tratamento:</strong>
+                      {(!tratamentoOral && !tratamentoOD && !tratamentoOE) ? (
+                        <p className="text-slate-500 italic">Nenhum medicamento prescrito no momento.</p>
+                      ) : (
+                        <ul className="list-disc ml-4 text-slate-800">
+                          {tratamentoOral && <li><strong>Oral:</strong> {tratamentoOral}</li>}
+                          {tratamentoOD && <li><strong>OD:</strong> {tratamentoOD}</li>}
+                          {tratamentoOE && <li><strong>OE:</strong> {tratamentoOE}</li>}
+                        </ul>
+                      )}
+                    </div>
+                    <div className="bg-white p-2.5 rounded-lg border border-blue-200">
+                      <strong className="text-blue-950 block text-xs">Conduta / Retorno:</strong>
+                      <p className="text-blue-900 font-semibold">{retornoOuAlta || 'Retorno caso necessário ou se houver piora dos sintomas.'}</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setModalRelatorioTutor(false)} className="px-4 py-2 text-slate-600 text-sm">Fechar</button>
+                  <button onClick={() => window.print()} className="px-5 py-2 bg-blue-600 text-white rounded-xl text-sm font-semibold">
+                    🖨️ Imprimir Relatório
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal Relatório Prontuário */}
+          {modalRelatorioProntuario && (
+            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setModalRelatorioProntuario(false)}>
+              <div className="bg-white rounded-2xl p-6 w-full max-w-3xl shadow-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+                <h3 className="font-bold text-lg text-indigo-950 mb-1">Relatório Prontuário Médico</h3>
+                <div className="flex-1 overflow-y-auto p-4 bg-slate-50 rounded-xl border border-slate-200 font-mono text-xs whitespace-pre-wrap leading-relaxed mb-4">
+{`PRONTUÁRIO CLÍNICO OFTALMOLÓGICO - HVA
+Data: ${fmtData(location.data)}   Tipo: ${location.tipoConsulta}
+Paciente: ${patient.nome} (${patient.especie} ${patient.raca})  Idade: ${patient.idade}  Tutor: ${patient.tutor}
+
+QUEIXA / HISTÓRICO:
+${chiefComplaint || 'Sem queixa registrada.'}
+
+ACHADOS OD:
+- Schirmer: ${examsOD.schirmer || '—'} mm/min (${interpretSchirmer(examsOD.schirmer)})
+- PIO: ${examsOD.pio || '—'} mmHg (${interpretPio(examsOD.pio)})
+${Object.entries(examsOD).filter(([k,v]) => !['schirmer','pio'].includes(k) && v).map(([k,v]) => `- ${k}: ${v}`).join('\n')}
+
+ACHADOS OE:
+- Schirmer: ${examsOE.schirmer || '—'} mm/min (${interpretSchirmer(examsOE.schirmer)})
+- PIO: ${examsOE.pio || '—'} mmHg (${interpretPio(examsOE.pio)})
+${Object.entries(examsOE).filter(([k,v]) => !['schirmer','pio'].includes(k) && v).map(([k,v]) => `- ${k}: ${v}`).join('\n')}
+
+=================================================
+RESUMO DO ATENDIMENTO:
+-------------------------------------------------
+DIAGNÓSTICO PROVÁVEL: ${diagnostico || 'Sem diagnóstico formal registrado'}
+
+TRATAMENTO INSTITUÍDO:
+${tratamentoOral ? `• Oral: ${tratamentoOral}\n` : ''}${tratamentoOD ? `• Olho Direito (OD): ${tratamentoOD}\n` : ''}${tratamentoOE ? `• Olho Esquerdo (OE): ${tratamentoOE}\n` : ''}${(!tratamentoOral && !tratamentoOD && !tratamentoOE) ? '• Nenhum tratamento medicamentoso prescrito.\n' : ''}
+RETORNO OU ALTA MÉDICA: ${retornoOuAlta || 'Retorno a critério clínico / caso observe piora'}
+=================================================
+Dr. Adélio Gurgel do Amaral Jr. - CRMV-SP 18.721
+Serviço de Oftalmologia Veterinária - HVA`}
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setModalRelatorioProntuario(false)} className="px-4 py-2 text-slate-600 text-sm">Fechar</button>
+                  <button onClick={() => window.print()} className="px-5 py-2 bg-indigo-700 text-white rounded-xl text-sm font-semibold">
+                    🖨️ Imprimir
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal Buscar Fichas */}
+          {modalBusca && (
+            <ModalBuscaFichas
+              onFechar={() => setModalBusca(false)}
+              onAbrir={(f, a) => {
+                setPatient(a.patient || f.paciente);
+                setLocation(a.location || { data: a.data });
+                setChiefComplaint(a.chiefComplaint || '');
+                setExamsOD(a.examsOD || {});
+                setExamsOE(a.examsOE || {});
+                setExamesComplementares(a.examesComplementares || {});
+                setTratamentoOral(a.tratamentoOral || '');
+                setTratamentoOD(a.tratamentoOD || '');
+                setTratamentoOE(a.tratamentoOE || '');
+                setDiagnostico(a.diagnostico || '');
+                setFichaId(f.id);
+                setAtendId(a.id);
+                setFichaAtual(f);
+                setModalBusca(false);
+                mostrarAviso(`Ficha de ${f.paciente.nome} aberta.`);
+              }}
+            />
+          )}
+
+          {/* Modal Foto Sistema Hospitalar */}
+          {modalFotoSistema && (
+            <ModalFotoSistema
+              apiBase={API_BASE}
+              onFechar={() => setModalFotoSistema(false)}
+              onAplicar={(dados, tipo) => {
+                setPatient((p) => ({ ...p, ...dados }));
+                if (tipo) setLocation((l) => ({ ...l, tipoConsulta: tipo }));
+                setModalFotoSistema(false);
+                mostrarAviso(`✨ Dados de ${dados.nome || 'paciente'} preenchidos pela foto da tela!`);
+              }}
+            />
+          )}
+
+          {/* Modal Fotos do 2º Celular */}
+          {modalFotoCelular && (
+            <ModalFotoCelular
+              apiBase={API_BASE}
+              patientName={patient.nome}
+              onFechar={() => setModalFotoCelular(false)}
+              onFotoRecebida={(item) => {
+                const { target, dataUrl } = item;
+                if (target === 'OD') setExamsOD(prev => ({ ...prev, anexos_photos: [...(prev.anexos_photos||[]), dataUrl] }));
+                else if (target === 'OE') setExamsOE(prev => ({ ...prev, anexos_photos: [...(prev.anexos_photos||[]), dataUrl] }));
+                else if (target === 'OD_cornea') setExamsOD(prev => ({ ...prev, cornea_photos: [...(prev.cornea_photos||[]), dataUrl] }));
+                else if (target === 'OE_cornea') setExamsOE(prev => ({ ...prev, cornea_photos: [...(prev.cornea_photos||[]), dataUrl] }));
+                else if (target === 'ultrassom') setExamesComplementares(prev => ({ ...prev, ultrassom_photos: [...(prev.ultrassom_photos||[]), dataUrl] }));
+                else setExamsOD(prev => ({ ...prev, anexos_photos: [...(prev.anexos_photos||[]), dataUrl] }));
+                mostrarAviso('📸 Foto recebida do 2º celular e inserida na ficha!');
+              }}
+            />
+          )}
+
+          {/* Toast Notificação */}
+          {aviso && (
+            <div className={`fixed bottom-5 left-1/2 -translate-x-1/2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white shadow-xl ${aviso.erro ? 'bg-red-600' : 'bg-slate-900'}`}>
+              {aviso.texto}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function ModalFotoSistema({ apiBase, onFechar, onAplicar }) {
+      const [imagemUrl, setImagemUrl] = useState(null);
+      const [processando, setProcessando] = useState(false);
+      const [erro, setErro] = useState('');
+      const [nome, setNome] = useState('');
+      const [especie, setEspecie] = useState('');
+      const [raca, setRaca] = useState('');
+      const [sexo, setSexo] = useState('');
+      const [idade, setIdade] = useState('');
+      const [tutor, setTutor] = useState('');
+      const [tipoConsulta, setTipoConsulta] = useState('');
+      const [extraido, setExtraido] = useState(false);
+
+      function processarFile(file) {
+        if (!file) return;
+        setErro('');
+        setProcessando(true);
+        setExtraido(false);
+
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+          const dataUrl = e.target.result;
+          setImagemUrl(dataUrl);
+
+          try {
+            const parts = dataUrl.split(',');
+            const base64 = parts[1] || '';
+            const mime = (parts[0].match(/:(.*?);/) || [])[1] || file.type || 'image/jpeg';
+
+            const res = await fetch(`${apiBase}/api/gemini/extract-patient`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ imageBase64: base64, mimeType: mime })
+            });
+
+            if (!res.ok) {
+              const errData = await res.json().catch(() => ({}));
+              throw new Error(errData.error || `Erro HTTP ${res.status}`);
+            }
+
+            const data = await res.json();
+            setNome(data.nome || '');
+            setEspecie(data.especie || '');
+            setRaca(data.raca || '');
+            setSexo(data.sexo || '');
+            setIdade(data.idade || (data.dataNascimento ? `Nasc: ${data.dataNascimento}` : ''));
+            setTutor(data.tutor || '');
+            setTipoConsulta(data.tipoConsulta || 'Consulta');
+            setExtraido(true);
+          } catch (err) {
+            setErro('Não foi possível extrair dados: ' + err.message);
+          } finally {
+            setProcessando(false);
+          }
+        };
+        reader.readAsDataURL(file);
+      }
+
+      return (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={onFechar}>
+          <div className="bg-white rounded-2xl p-5 w-full max-w-xl shadow-2xl max-h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between pb-3 border-b mb-3">
+              <h3 className="font-bold text-base text-slate-900 flex items-center gap-2">
+                <span>📸</span> Foto da Tela do Hospital (Extração com IA)
+              </h3>
+              <button onClick={onFechar} className="text-slate-400 hover:text-slate-600 font-bold text-lg">✕</button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-4">
+              <div className="bg-blue-50/70 p-3 rounded-xl border border-blue-200 text-xs text-blue-900 leading-relaxed">
+                Tire uma foto direta da tela do computador do hospital, ficha ou receituário. O Gemini identificará automaticamente os dados cadastrais!
+              </div>
+
+              <div className="flex flex-wrap gap-2 justify-center">
+                <label className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold cursor-pointer shadow-xs active:scale-95 flex items-center gap-2">
+                  <span>📷</span> Tirar Foto Agora
+                  <input type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => { if (e.target.files && e.target.files[0]) processarFile(e.target.files[0]); }} />
+                </label>
+
+                <label className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-xl text-xs font-semibold cursor-pointer shadow-2xs active:scale-95 flex items-center gap-2">
+                  <span>🖼️</span> Escolher da Galeria / Print
+                  <input type="file" accept="image/*" className="hidden" onChange={(e) => { if (e.target.files && e.target.files[0]) processarFile(e.target.files[0]); }} />
+                </label>
+              </div>
+
+              {processando && (
+                <div className="p-4 bg-slate-50 border rounded-xl text-center text-xs text-blue-700 font-semibold animate-pulse">
+                  ⏳ Analisando a foto da tela com Inteligência Artificial...
+                </div>
+              )}
+
+              {erro && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700">
+                  {erro}
+                </div>
+              )}
+
+              {imagemUrl && (
+                <div className="text-center">
+                  <img src={imagemUrl} alt="Foto da tela" className="max-h-44 mx-auto rounded-lg border object-contain" />
+                </div>
+              )}
+
+              {extraido && (
+                <div className="bg-slate-50 p-3 rounded-xl border space-y-2 text-xs">
+                  <span className="font-bold text-emerald-800 block">✓ Dados Identificados com Sucesso:</span>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-slate-600 font-semibold">Nome:</label>
+                      <input className="w-full p-1.5 border rounded-lg bg-white" value={nome} onChange={(e) => setNome(e.target.value)} />
+                    </div>
+                    <div>
+                      <label className="block text-slate-600 font-semibold">Tutor:</label>
+                      <input className="w-full p-1.5 border rounded-lg bg-white" value={tutor} onChange={(e) => setTutor(e.target.value)} />
+                    </div>
+                    <div>
+                      <label className="block text-slate-600 font-semibold">Espécie:</label>
+                      <input className="w-full p-1.5 border rounded-lg bg-white" value={especie} onChange={(e) => setEspecie(e.target.value)} />
+                    </div>
+                    <div>
+                      <label className="block text-slate-600 font-semibold">Raça:</label>
+                      <input className="w-full p-1.5 border rounded-lg bg-white" value={raca} onChange={(e) => setRaca(e.target.value)} />
+                    </div>
+                    <div>
+                      <label className="block text-slate-600 font-semibold">Sexo:</label>
+                      <input className="w-full p-1.5 border rounded-lg bg-white" value={sexo} onChange={(e) => setSexo(e.target.value)} />
+                    </div>
+                    <div>
+                      <label className="block text-slate-600 font-semibold">Idade:</label>
+                      <input className="w-full p-1.5 border rounded-lg bg-white" value={idade} onChange={(e) => setIdade(e.target.value)} />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-between items-center pt-3 border-t mt-3">
+              <button onClick={onFechar} className="px-4 py-2 text-slate-600 text-xs font-semibold">Cancelar</button>
+              {extraido && (
+                <button
+                  onClick={() => onAplicar({ nome, tutor, especie, raca, sexo, idade }, tipoConsulta)}
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs active:scale-95"
+                >
+                  ✅ Inserir Dados na Ficha
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function ModalFotoCelular({ apiBase, patientName, onFechar, onFotoRecebida }) {
+      const [sessionId, setSessionId] = useState(null);
+      const [carregando, setCarregando] = useState(true);
+
+      useEffect(() => {
+        fetch(`${apiBase}/api/sync/session`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ patientName: patientName || 'Paciente HVA' })
+        })
+        .then(r => r.json())
+        .then(data => {
+          if (data.sessionId) setSessionId(data.sessionId);
+        })
+        .catch(console.error)
+        .finally(() => setCarregando(false));
+      }, []);
+
+      useEffect(() => {
+        if (!sessionId) return;
+        const interval = setInterval(async () => {
+          try {
+            const res = await fetch(`${apiBase}/api/sync/${sessionId}/photos`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const fotos = data.photos || [];
+            if (fotos.length > 0) {
+              fotos.forEach(onFotoRecebida);
+            }
+          } catch (err) {}
+        }, 2000);
+        return () => clearInterval(interval);
+      }, [sessionId]);
+
+      const urlSessao = sessionId ? `${apiBase}/sync/${sessionId}` : '';
+      const qrCodeUrl = sessionId ? `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(urlSessao)}&margin=10` : '';
+
+      return (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={onFechar}>
+          <div className="bg-white rounded-2xl p-5 w-full max-w-lg shadow-2xl max-h-[92vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between pb-3 border-b mb-3">
+              <h3 className="font-bold text-base text-slate-900 flex items-center gap-2">
+                <span>📲</span> Fotos de Outro Celular (Câmera Secundária)
+              </h3>
+              <button onClick={onFechar} className="text-slate-400 hover:text-slate-600 font-bold text-lg">✕</button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-3 text-center text-xs text-slate-700">
+              <p>Aponte a câmera do seu segundo celular para o QR Code abaixo:</p>
+              {carregando ? (
+                <div className="p-10 text-slate-400">Gerando código de conexão...</div>
+              ) : qrCodeUrl ? (
+                <div>
+                  <img src={qrCodeUrl} alt="QR Code" className="w-48 h-48 mx-auto border rounded-xl shadow-xs p-1" />
+                  <div className="mt-2 font-mono font-bold text-blue-700 bg-blue-50 py-1 px-3 rounded-lg inline-block">
+                    Sessão: {sessionId}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-red-500">Erro ao carregar conexão.</div>
+              )}
+              <p className="text-[11px] text-slate-500">Ao abrir no celular, escolha se a foto é de OD, OE, Córnea ou Ultrassom e tire a foto. Ela aparecerá aqui instantaneamente!</p>
+            </div>
+
+            <div className="flex justify-end pt-3 border-t mt-3">
+              <button onClick={onFechar} className="px-4 py-2 bg-blue-600 text-white rounded-xl text-xs font-bold">Concluir</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function ModalBuscaFichas({ onFechar, onAbrir }) {
+      const [fichas, setFichas] = useState([]);
+      const [q, setQ] = useState('');
+
+      useEffect(() => {
+        FichasDB.listar().then(setFichas);
+      }, []);
+
+      const filtradas = fichas.filter((f) => {
+        const termo = normalizarTexto(q);
+        if (!termo) return true;
+        const texto = normalizarTexto(`${f.paciente.nome} ${f.paciente.tutor} ${f.paciente.especie} ${f.paciente.raca}`);
+        return texto.includes(termo);
+      });
+
+      return (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={onFechar}>
+          <div className="bg-white rounded-2xl p-5 w-full max-w-2xl shadow-xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-bold text-base mb-3">🔍 Buscar Fichas Salvas no Dispositivo</h3>
+            <input
+              type="text"
+              placeholder="Buscar por nome do paciente, tutor, espécie ou raça..."
+              className="w-full px-3 py-2 border rounded-xl text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              autoFocus
+            />
+
+            <div className="flex-1 overflow-y-auto space-y-2 mb-3">
+              {filtradas.length === 0 ? (
+                <p className="text-xs text-slate-400 py-6 text-center">Nenhuma ficha encontrada.</p>
+              ) : (
+                filtradas.map((f) => {
+                  const ultimo = f.atendimentos[f.atendimentos.length - 1] || {};
+                  return (
+                    <div key={f.id} className="p-3 border rounded-xl flex items-center justify-between hover:bg-slate-50">
+                      <div>
+                        <div className="font-bold text-sm text-blue-950">{f.paciente.nome || 'Sem nome'}</div>
+                        <div className="text-xs text-slate-500">
+                          Tutor: {f.paciente.tutor || '—'} · {f.paciente.especie || '—'} {f.paciente.raca || ''} · {f.atendimentos.length} atendimento(s)
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => onAbrir(f, ultimo)}
+                        className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-semibold"
+                      >
+                        Abrir
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="flex justify-between items-center pt-2 border-t text-xs">
+              <button
+                onClick={() => {
+                  FichasDB.listar().then((todas) => {
+                    const blob = new Blob([JSON.stringify(todas, null, 2)], { type: 'application/json' });
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = `backup_fichas_hva_${hojeISO()}.json`;
+                    a.click();
+                  });
+                }}
+                className="text-blue-600 font-semibold underline"
+              >
+                ⬇️ Exportar Backup de Todas as Fichas
+              </button>
+              <button onClick={onFechar} className="px-4 py-2 bg-slate-200 rounded-xl text-slate-700">Fechar</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    try {
+      if (ReactDOM.createRoot) {
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+      } else {
+        ReactDOM.render(<App />, document.getElementById('root'));
+      }
+    } catch (e) {
+      console.error(e);
+      ReactDOM.render(<App />, document.getElementById('root'));
+    }
+  </script>
+</body>
+</html>

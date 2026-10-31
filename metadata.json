@@ -1,0 +1,6 @@
+{
+  "name": "Ficha Oftalmológica Veterinária - HVA",
+  "description": "Prontuário clínico oftalmológico veterinário com gravação e transcrição inteligente de consultas, receituário e relatórios.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
