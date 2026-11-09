@@ -260,7 +260,9 @@ export const RecordingSection: React.FC<RecordingSectionProps> = ({
       }
 
       // Step 2: Transcribe via Gemini
-      const texto = await transcreverAudio(base64, mime, cfg);
+      const texto = base64Mp3
+        ? await transcreverAudio(base64Mp3, 'audio/mp3', cfg, { base64, mimeType: mime })
+        : await transcreverAudio(base64, mime, cfg);
       const textoLimpo = (texto || '').trim();
 
       if (textoLimpo) {
@@ -697,9 +699,11 @@ export const RecordingSection: React.FC<RecordingSectionProps> = ({
       const mime = mimeSeguro(arq.type);
 
       // Convert to MP3
+      let base64Mp3: string | undefined;
       try {
         const mp3Res = await converterAudioParaMp3(base64, mime);
-        const mp3Blob = base64ToBlob(mp3Res.mp3Base64, 'audio/mp3');
+        base64Mp3 = mp3Res.mp3Base64;
+        const mp3Blob = base64ToBlob(base64Mp3, 'audio/mp3');
         setMasterMp3Blob(mp3Blob);
         setMasterMp3Url(URL.createObjectURL(mp3Blob));
       } catch (convErr) {
@@ -707,7 +711,9 @@ export const RecordingSection: React.FC<RecordingSectionProps> = ({
       }
 
       // Transcribe
-      const texto = await transcreverAudio(base64, mime, cfg);
+      const texto = base64Mp3
+        ? await transcreverAudio(base64Mp3, 'audio/mp3', cfg, { base64, mimeType: mime })
+        : await transcreverAudio(base64, mime, cfg);
       if (!texto || !texto.trim()) {
         setStatus('Nenhuma fala audível foi identificada no arquivo enviado.');
         return;

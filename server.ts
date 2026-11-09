@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
@@ -88,57 +89,31 @@ async function startServer() {
         return res.status(400).json({ error: 'Nenhum áudio enviado para transcrição.' });
       }
 
-      const ai = getAiClient(userKey);
-      const chosenModel = model || 'gemini-3.5-flash';
-      const modelsToTry = [
-        chosenModel,
-        'gemini-3.5-flash',
-        'gemini-3.8-flash',
-        'gemini-3.7-flash',
-        'gemini-3.5-transcribe',
-        'gemini-3.1-flash-lite',
-      ].filter((m, i, arr) => arr.indexOf(m) === i);
+      const apiKey = (userKey && userKey.trim()) || process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        return res.status(401).json({ error: 'Chave de API do Gemini não configurada. Configure no AI Studio ou nas Configurações do app.' });
+      }
 
-      const PROMPT_TRANSCRICAO = `Transcreva fielmente, em português do Brasil, esta conversa de uma consulta de oftalmologia veterinária entre o veterinário e o tutor do animal.
+      const cleanBase64 = audioBase64.includes(',') ? audioBase64.split(',')[1] : audioBase64;
+      const cleanMime = mimeType ? mimeType.split(';')[0].trim() : 'audio/mp3';
 
-Regras:
-- Identifique quem fala como "Veterinário:" e "Tutor:" (use "Outro:" se houver mais alguém).
-- Não resuma, não corrija o conteúdo e não invente nada. Transcreva só o que foi dito.
-- Escreva com atenção termos oftalmológicos, nomes de medicamentos, concentrações e doses.
-- Se algo estiver inaudível, escreva [inaudível].
-- Se não houver nenhuma fala no áudio, responda exatamente: [silêncio]`;
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const generativeModel = genAI.getGenerativeModel({ 
+        model: (model && model !== 'gemini-3.8-flash') ? model : 'gemini-1.5-flash' 
+      });
 
-      const response = await callWithFallback(
-        ai,
+      const result = await generativeModel.generateContent([
+        'Transcreva o áudio a seguir com precisão. Retorne apenas o texto transcrito.',
         {
-          contents: [
-            {
-              parts: [
-                { text: PROMPT_TRANSCRICAO },
-                {
-                  inlineData: {
-                    mimeType: mimeType || 'audio/webm',
-                    data: audioBase64,
-                  },
-                },
-              ],
-            },
-          ],
-          config: {
-            temperature: 0,
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          inlineData: {
+            data: cleanBase64,
+            mimeType: cleanMime,
           },
         },
-        modelsToTry
-      );
+      ]);
 
-      let text = response.text || '';
-      if (!text && response.candidates?.[0]?.content?.parts) {
-        text = response.candidates[0].content.parts
-          .map((p: any) => p.text || '')
-          .join('')
-          .trim();
-      }
+      const response = await result.response;
+      let text = response.text() || '';
 
       if (/^\[sil[eê]ncio\]$/i.test(text.trim())) {
         text = '';
@@ -147,7 +122,12 @@ Regras:
       res.json({ text });
     } catch (err: any) {
       console.error('Transcription error:', err);
-      res.status(500).json({ error: err.message || 'Erro ao transcrever o áudio.' });
+      const status = typeof err.status === 'number'
+        ? err.status
+        : (typeof err.statusCode === 'number'
+          ? err.statusCode
+          : (err.message?.includes('400') ? 400 : err.message?.includes('401') ? 401 : err.message?.includes('403') ? 403 : 500));
+      res.status(status).json({ error: err.message || 'Erro ao transcrever o áudio.' });
     }
   });
 

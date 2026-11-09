@@ -15,32 +15,77 @@ export async function checkGeminiStatus(): Promise<{ hasServerKey: boolean; defa
 export async function transcreverAudio(
   audioBase64: string,
   mimeType: string,
-  cfg: GeminiConfig
+  cfg: GeminiConfig,
+  audioAlternativo?: { base64: string; mimeType: string }
 ): Promise<string> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+  const delays = [0, 2000, 5000];
+
+  const tentarComRetry = async (b64: string, mime: string): Promise<string> => {
+    let ultimoErro: any = null;
+
+    for (let i = 0; i < delays.length; i++) {
+      if (delays[i] > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delays[i]));
+      }
+
+      try {
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
+        if (cfg.chave && cfg.chave.trim()) {
+          headers['x-goog-api-key'] = cfg.chave.trim();
+        }
+
+        const res = await fetch('/api/gemini/transcribe', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            audioBase64: b64,
+            mimeType: mime,
+            model: cfg.modelo || 'gemini-3.8-flash',
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          return data.text || '';
+        }
+
+        const data = await res.json().catch(() => ({}));
+        const erroMsg = data.error || `Falha na transcrição (HTTP ${res.status})`;
+
+        // Interrompe o retry imediatamente se for erro 400, 401 ou 403
+        if (res.status === 400 || res.status === 401 || res.status === 403) {
+          throw new Error(erroMsg);
+        }
+
+        ultimoErro = new Error(erroMsg);
+      } catch (err: any) {
+        const msg = err.message || '';
+        if (msg.includes('HTTP 400') || msg.includes('HTTP 401') || msg.includes('HTTP 403')) {
+          throw err;
+        }
+        ultimoErro = err;
+      }
+    }
+
+    throw ultimoErro || new Error('Falha na transcrição após várias tentativas.');
   };
-  if (cfg.chave && cfg.chave.trim()) {
-    headers['x-goog-api-key'] = cfg.chave.trim();
+
+  try {
+    return await tentarComRetry(audioBase64, mimeType);
+  } catch (errPrincipal) {
+    if (audioAlternativo && audioAlternativo.base64) {
+      console.warn('Transcrição com áudio principal falhou, tentando áudio alternativo...', errPrincipal);
+      try {
+        return await tentarComRetry(audioAlternativo.base64, audioAlternativo.mimeType);
+      } catch (errAlt) {
+        console.error('Transcrição com áudio alternativo também falhou:', errAlt);
+        throw errAlt;
+      }
+    }
+    throw errPrincipal;
   }
-
-  const res = await fetch('/api/gemini/transcribe', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      audioBase64,
-      mimeType,
-      model: cfg.modelo || 'gemini-3.8-flash',
-    }),
-  });
-
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Falha na transcrição (HTTP ${res.status})`);
-  }
-
-  const data = await res.json();
-  return data.text || '';
 }
 
 export async function resumirConsulta(
